@@ -21,11 +21,11 @@ async def read_root(db: Session = Depends(get_db)):
     if not retos:
         return {"No hay retos"}
     else:
-        return {"Reto:", "Musica", retos.Musica,
-        "Lectura",retos.Lectura,
-        "Cine y Television", retos.Cine_y_Television,
-        "Videojuegos", retos.Videojuegos,
-        "Comida", retos.Comida,
-        "Deporte", retos.Deporte,
-        "Salir", retos.Salir,
-        "Arte", retos.Arte}
+        return {"Reto:", retos.Musica,
+        retos.Lectura,
+        retos.Cine_y_Television,
+        retos.Videojuegos,
+        retos.Comida,
+        retos.Deporte,
+        retos.Salir,
+        retos.Arte}
