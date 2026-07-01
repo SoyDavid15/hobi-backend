@@ -1,3 +1,7 @@
+
+import uuid
+from uploadPhoto import supabase
+from fastapi import Form
 import hashlib
 from datetime import date, datetime, timezone
 from pydantic import BaseModel
@@ -5,11 +9,22 @@ from pydantic import BaseModel
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
+from PIL import Image
 
 # Importaciones de tu base de datos y modelos
 from database import engine, SessionLocal
 import models
 from models import Retos, UserProgress
+
+#-----------------------------
+#Importaciones de IA
+#-----------------------------#
+
+from ai import verificacion_IA
+from fastapi import UploadFile, File
+import io
+from PIL import Image
+
 
 class ChallengeRequest(BaseModel):
     user_id: str
@@ -25,8 +40,7 @@ app = FastAPI(
     description="API para retos diarios y subida de fotos a Supabase"
 )
 
-# 2. Incluir el router de fotos (esto añade el endpoint POST /upload-photo automáticamente)
-app.include_router(photo_router)
+
 
 # 3. Dependencia de Base de Datos corregida
 def get_db():
@@ -137,3 +151,45 @@ async def mark_reto_realizado(req: ChallengeRequest, db: Session = Depends(get_d
         "completed_challenges": progress.completed_challenges,
         "streak": progress.streak
     }
+
+#--------------------------------------------------------------------------#
+# Logica de IA
+#--------------------------------------------------------------------------#
+
+@app.post("/ia/verificacion")
+async def verificar_ia(
+    texto_reto: str = Form(...),          
+    photo: UploadFile = File(...), 
+    db: Session = Depends(get_db)
+):
+    # 1. Leer bytes y procesar con Pillow para Gemini
+    bytes_foto = await photo.read()
+    imagen_pil = Image.open(io.BytesIO(bytes_foto))
+    
+    # 2. Gemini da su veredicto
+    respuesta = verificacion_IA(imagen_pil, texto_reto)
+    
+    # 3. Si la IA dice que es válido, guardamos todo para el historial
+    if respuesta.get("validar") == True:
+        nombre_unico = f"{uuid.uuid4()}_{photo.filename}"
+        
+        # Guardar archivo real en el Storage de Supabase
+        supabase.storage.from_("Foto").upload(
+            path=nombre_unico, 
+            file=bytes_foto, 
+            file_options={"content-type": photo.content_type}
+        )
+        
+        # Obtener la dirección web de esa foto
+        url_publica = supabase.storage.from_("Foto").get_public_url(nombre_unico)
+        
+        # Guardar la dirección web en tu base de datos PostgreSQL
+        nuevo_registro = models.RegistroReto(
+            texto_reto=texto_reto,
+            url_foto=url_publica,  # <-- Aquí es donde db hace que se pueda volver a ver
+            cumplido=True
+        )
+        db.add(nuevo_registro)
+        db.commit()
+     
+    return respuesta
