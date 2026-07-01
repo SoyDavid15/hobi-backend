@@ -1,81 +1,48 @@
-
-import uuid
-from uploadPhoto import supabase
-from fastapi import Form
 import hashlib
-from datetime import date, datetime, timezone
-from pydantic import BaseModel
-
-from fastapi import FastAPI, Depends, HTTPException
+from datetime import date
+from fastapi import FastAPI, Depends, HTTPException, Form, UploadFile, File
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from PIL import Image
 
-# Importaciones de tu base de datos y modelos
-from database import engine, SessionLocal
+from database import SessionLocal, engine
 import models
-from models import Retos, UserProgress
+from models import Retos
+from uploadPhoto import SupabaseStorageService
+from challenge_service import ChallengeService
 
-#-----------------------------
-#Importaciones de IA
-#-----------------------------#
-
-from ai import verificacion_IA
-from fastapi import UploadFile, File
-import io
-from PIL import Image
-
-
-class ChallengeRequest(BaseModel):
-    user_id: str
-
-# Importamos el router de las fotos (asegúrate de que el archivo se llame uploadPhoto.py)
-from uploadPhoto import router as photo_router
-
-# 1. Crear las tablas (incluyendo "fotos" y "retos" en PostgreSQL)
+# Inicializar tablas e instancias
 models.Base.metadata.create_all(bind=engine)
+app = FastAPI(title="Hobi API Premium", description="Estructura desacoplada y escalable")
+storage_service = SupabaseStorageService()
 
-app = FastAPI(
-    title="Hobi API",
-    description="API para retos diarios y subida de fotos a Supabase"
-)
-
-
-
-# 3. Dependencia de Base de Datos corregida
+# Dependencia de conexión de DB
 def get_db():
-    db = SessionLocal()  # <-- Esto evita los problemas de conexión
+    db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
 
-# --------------------------------------------------------------------------- #
-# Lógica de Retos Diarios
-# --------------------------------------------------------------------------- #
-
 def get_daily_seed() -> float:
-    """Genera un número flotante único entre -1.0 y 1.0 basado en la fecha de hoy para PostgreSQL"""
+    """Genera una semilla determinista basada en la fecha actual."""
     today_str = str(date.today())
-    hash_object = hashlib.md5(today_str.encode())
-    hash_hex = hash_object.hexdigest()
-    seed = int(hash_hex[:8], 16) / 4294967295.0
-    return (seed * 2) - 1
+    hash_hex = hashlib.md5(today_str.encode()).hexdigest()
+    return (int(hash_hex[:8], 16) / 4294967295.0 * 2) - 1
 
 
+# =========================================================================== #
+# ENDPOINT 1: Obtener Retos Diarios
+# =========================================================================== #
 @app.get('/retos')
-async def read_root(db: Session = Depends(get_db)):
-    # 1. Fijar la semilla aleatoria en PostgreSQL para el día de hoy
+async def get_daily_challenges(db: Session = Depends(get_db)):
+    """Muestra los retos almacenados usando una semilla aleatoria diaria fija."""
     seed_value = get_daily_seed()
     db.execute(func.setseed(seed_value))
     
-    # 2. Realizar la consulta ordenada por la semilla diaria fija
     reto = db.query(Retos).order_by(func.random()).first()
-
     if not reto:
-        raise HTTPException(status_code=404, detail="No hay retos disponibles")
+        raise HTTPException(status_code=404, detail="No se encontraron retos en la base de datos.")
     
-    # 3. Retornar un diccionario estructurado (clave: valor)
     return {
         "Musica": reto.Musica,
         "Lectura": reto.Lectura,
@@ -87,109 +54,55 @@ async def read_root(db: Session = Depends(get_db)):
         "Arte": reto.Arte
     }
 
-# --------------------------------------------------------------------------- #
-# Lógica de Progreso de Usuario
-# --------------------------------------------------------------------------- #
 
-@app.get('/progreso/{user_id}')
-async def get_progreso(user_id: str, db: Session = Depends(get_db)):
-    progress = db.query(UserProgress).filter(UserProgress.user_id == user_id).first()
-    if not progress:
-        return {"completed_challenges": 0, "streak": 0, "last_completed_date": None}
-    
-    # Validar si la racha sigue vigente
-    if progress.last_completed_date:
-        today = datetime.now(timezone.utc).date()
-        last_date = progress.last_completed_date.date()
-        diff_days = (today - last_date).days
-        
-        if diff_days > 1:
-            progress.streak = 0
-            db.commit()
-
-    return {
-        "completed_challenges": progress.completed_challenges,
-        "streak": progress.streak,
-        "last_completed_date": progress.last_completed_date.isoformat() if progress.last_completed_date else None
-    }
-
+# =========================================================================== #
+# ENDPOINT 2: Registrar Reto Realizado (Subida + Progreso sin IA)
+# =========================================================================== #
 @app.post('/retos/realizado')
-async def mark_reto_realizado(req: ChallengeRequest, db: Session = Depends(get_db)):
-    progress = db.query(UserProgress).filter(UserProgress.user_id == req.user_id).first()
-    today = datetime.now(timezone.utc)
-    
-    if not progress:
-        progress = UserProgress(
-            user_id=req.user_id,
-            completed_challenges=1,
-            streak=1,
-            last_completed_date=today
-        )
-        db.add(progress)
-    else:
-        if progress.last_completed_date:
-            last_date = progress.last_completed_date.date()
-            today_date = today.date()
-            diff_days = (today_date - last_date).days
-            
-            if diff_days == 1:
-                progress.streak += 1
-            elif diff_days > 1:
-                progress.streak = 1
-            elif diff_days == 0 and progress.streak == 0:
-                progress.streak = 1
-        else:
-            progress.streak = 1
-            
-        progress.completed_challenges += 1
-        progress.last_completed_date = today
-    
-    db.commit()
-    db.refresh(progress)
-    return {
-        "message": "Progreso actualizado",
-        "completed_challenges": progress.completed_challenges,
-        "streak": progress.streak
-    }
-
-#--------------------------------------------------------------------------#
-# Logica de IA
-#--------------------------------------------------------------------------#
-
-@app.post("/ia/verificacion")
-async def verificar_ia(
-    texto_reto: str = Form(...),          
-    photo: UploadFile = File(...), 
+async def mark_challenge_as_done(
+    user_id: str = Form(...),
+    file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):
-    # 1. Leer bytes y procesar con Pillow para Gemini
-    bytes_foto = await photo.read()
-    imagen_pil = Image.open(io.BytesIO(bytes_foto))
+    """Recibe la foto del usuario, la almacena en la nube y actualiza sus estadísticas."""
+    # 1. Leer archivo
+    file_bytes = await file.read()
     
-    # 2. Gemini da su veredicto
-    respuesta = verificacion_IA(imagen_pil, texto_reto)
+    # 2. Subir a la nube de manera aislada
+    try:
+        url_publica = await storage_service.upload_file(
+            file_bytes=file_bytes,
+            original_filename=file.filename,
+            content_type=file.content_type
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Error en el almacenamiento en la nube: {str(e)}"
+        )
     
-    # 3. Si la IA dice que es válido, guardamos todo para el historial
-    if respuesta.get("validar") == True:
-        nombre_unico = f"{uuid.uuid4()}_{photo.filename}"
-        
-        # Guardar archivo real en el Storage de Supabase
-        supabase.storage.from_("Foto").upload(
-            path=nombre_unico, 
-            file=bytes_foto, 
-            file_options={"content-type": photo.content_type}
+    # 3. Procesar las reglas del negocio e insertar en PostgreSQL
+    try:
+        progress = ChallengeService.process_challenge_completion(
+            db=db,
+            user_id=user_id,
+            filename=file.filename,
+            file_size=file.size,
+            url_publica=url_publica
         )
-        
-        # Obtener la dirección web de esa foto
-        url_publica = supabase.storage.from_("Foto").get_public_url(nombre_unico)
-        
-        # Guardar la dirección web en tu base de datos PostgreSQL
-        nuevo_registro = models.RegistroReto(
-            texto_reto=texto_reto,
-            url_foto=url_publica,  # <-- Aquí es donde db hace que se pueda volver a ver
-            cumplido=True
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al actualizar el progreso en la base de datos: {str(e)}"
         )
-        db.add(nuevo_registro)
-        db.commit()
-     
-    return respuesta
+
+    # 4. Respuesta limpia y estandarizada
+    return {
+        "status": "success",
+        "message": "Reto completado exitosamente",
+        "data": {
+            "url_foto": url_publica,
+            "streak": progress.streak,
+            "completed_challenges": progress.completed_challenges
+        }
+    }
