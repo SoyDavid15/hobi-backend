@@ -20,6 +20,7 @@ class Foto(Base):
     __tablename__ = "fotos"
     
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, index=True)  # 👈 COLUMNA AGREGADA
     nombre = Column(String, index=True)
     ruta = Column(String)
     fecha = Column(DateTime, server_default=func.now()) 
@@ -32,7 +33,5 @@ class UserProgress(Base):
     completed_challenges = Column(Integer, default=0)
     streak = Column(Integer, default=0)
     last_completed_date = Column(DateTime, nullable=True)
-
-
 
 Base.metadata.create_all(engine)

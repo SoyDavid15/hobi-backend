@@ -1,4 +1,5 @@
 import hashlib
+import os
 from datetime import date
 from fastapi import FastAPI, Depends, HTTPException, Form, UploadFile, File
 from sqlalchemy.orm import Session
@@ -6,8 +7,8 @@ from sqlalchemy import func
 
 from database import SessionLocal, engine
 import models
-from models import Retos
-from uploadPhoto import SupabaseStorageService
+from models import Retos  # Nota: Asegúrate de que tu modelo 'Foto' también esté en models.py
+from foto import SupabaseStorageService  # 👈 CORREGIDO: Cambiado de uploadPhoto a foto
 from challenge_service import ChallengeService
 
 # Inicializar tablas e instancias
@@ -68,12 +69,13 @@ async def mark_challenge_as_done(
     # 1. Leer archivo
     file_bytes = await file.read()
     
-    # 2. Subir a la nube de manera aislada
+    # 2. Subir a la nube de manera aislada pasando el user_id
     try:
         url_publica = await storage_service.upload_file(
             file_bytes=file_bytes,
             original_filename=file.filename,
-            content_type=file.content_type
+            content_type=file.content_type,
+            user_id=user_id  # Crucial para aislar por carpeta
         )
     except Exception as e:
         raise HTTPException(
@@ -105,4 +107,33 @@ async def mark_challenge_as_done(
             "streak": progress.streak,
             "completed_challenges": progress.completed_challenges
         }
+    }
+
+
+# =========================================================================== #
+# ENDPOINT 3: Visualización de Imágenes del Usuario
+# =========================================================================== #
+@app.get("/usuarios/{user_id}/fotos")
+async def mostrar_imagenes_usuario(user_id: str, db: Session = Depends(get_db)):
+    """
+    Trae única y exclusivamente las URLs de las fotos que pertenecen 
+    al usuario solicitado consultando la base de datos.
+    """
+    # Buscamos en la tabla de fotos filtrando por el user_id
+    fotos_usuario = db.query(models.Foto).filter(models.Foto.user_id == user_id).all()
+    
+    if not fotos_usuario:
+        return {
+            "user_id": user_id,
+            "total_fotos": 0,
+            "fotos": []
+        }
+    
+    # Mapeamos los registros de la DB para extraer solo las URLs públicas
+    lista_urls = [foto.ruta for foto in fotos_usuario]
+    
+    return {
+        "user_id": user_id,
+        "total_fotos": len(lista_urls),
+        "fotos": lista_urls
     }
